@@ -351,6 +351,50 @@ def visualization_worker(render_queue, result_queue):
                                 'type': 'image',
                                 'image_path': img_path
                             })
+                    
+                    # commands for rotation and zoom
+                    elif command['command'] == 'rotate':
+                        if cloud is not None and view_control is not None:
+                            dx = command['dx']
+                            dy = command['dy']
+                            
+                            
+                            # Get current view parameters
+                            params = view_control.convert_to_pinhole_camera_parameters()
+                            
+                            # Rotate view using view_control methods
+                            view_control.rotate(dx, dy)
+                            
+                            vis.update_renderer()
+                            
+                            # Capture and send rendered image
+                            img_path = os.path.join(temp_dir, 'render.png')
+                            vis.capture_screen_image(img_path, do_render=True)
+                            
+                            result_queue.put({
+                                'type': 'image',
+                                'image_path': img_path
+                            })
+                    
+                    elif command['command'] == 'zoom':
+                        if cloud is not None and view_control is not None:
+                            zoom_factor = command['factor']
+                            
+                            # Apply zoom based on direction
+                            view_control.scale(zoom_factor)
+                            
+                            # Update visualization
+                            vis.poll_events()
+                            vis.update_renderer()
+                            
+                            # Capture and send rendered image
+                            img_path = os.path.join(temp_dir, 'render.png')
+                            vis.capture_screen_image(img_path, do_render=True)
+                            
+                            result_queue.put({
+                                'type': 'image',
+                                'image_path': img_path
+                            })
                 
             except queue.Empty:
                 pass
@@ -423,6 +467,12 @@ class PointCloudViewer:
         self.show_axes = False
         self.show_skymap = False
         
+        # Variables for rotation and zoom
+        self.is_rotating = False
+        self.last_x = 0
+        self.last_y = 0
+        self.zoom_scale = 1.0
+        
         self.create_menu_bar()
         
         # main frame
@@ -454,14 +504,75 @@ class PointCloudViewer:
 
         self.selected_points = []
         self.point_picking_mode = False
-        # self.point_markers = []
         
-        # Add this to track mouse position
+        # Bind mouse events for rotation and zoom
         self.canvas.bind("<Button-1>", self.on_canvas_click)
+        self.canvas.bind("<B2-Motion>", self.on_rotate_drag)  # Middle mouse button for rotation
+        self.canvas.bind("<Button-2>", self.on_rotate_start)
+        self.canvas.bind("<ButtonRelease-2>", self.on_rotate_stop)
+        
+        # Bind right mouse button for rotation as well
+        self.canvas.bind("<Button-3>", self.on_rotate_start)
+        self.canvas.bind("<B3-Motion>", self.on_rotate_drag)
+        self.canvas.bind("<ButtonRelease-3>", self.on_rotate_stop)
+        
+        # Bind mouse wheel for zoom
+        self.canvas.bind("<MouseWheel>", self.on_mouse_wheel)  # Windows
         
         # Set up periodic UI update from result queue
         self.root.after(100, self.check_result_queue)
         
+    def on_rotate_start(self, event):
+        """Start rotation when middle mouse button is pressed"""
+        if not self.point_picking_mode:
+            self.is_rotating = True
+            self.last_x = event.x
+            self.last_y = event.y
+            self.status_bar.config(text="Rotating view (hold and drag)")
+            
+    def on_rotate_stop(self, event):
+        """Stop rotation when middle mouse button is released"""
+        self.is_rotating = False
+        self.status_bar.config(text="Ready")
+        
+    def on_rotate_drag(self, event):
+        """Handle rotation by sending the delta to visualization process"""
+        if self.is_rotating:
+            # Calculate the motion difference
+            dx = event.x - self.last_x
+            dy = event.y - self.last_y
+            
+            # Update last position
+            self.last_x = event.x
+            self.last_y = event.y
+            
+            # Send rotation command to visualization process
+            self.render_queue.put({
+                'command': 'rotate',
+                'dx': dx,
+                'dy': dy
+            })
+    
+    def on_mouse_wheel(self, event):
+        """Handle zoom with mouse wheel on Windows"""
+        if not self.point_picking_mode:
+            # Get zoom direction from event.delta
+            zoom_factor = 1.0
+            direction = 'none'
+            if event.delta > 0:
+                zoom_factor = 1.1  # Zoom in
+                direction = 'in'
+            else:
+                zoom_factor = 0.9  # Zoom out
+                direction = 'out'
+                
+            # Send zoom command to visualization process
+            self.render_queue.put({
+                'command': 'zoom',
+                'factor': zoom_factor,
+                'direction': direction
+            })
+    
         
     def create_menu_bar(self):
         menu_bar = tk.Menu(self.root)
@@ -502,6 +613,12 @@ class PointCloudViewer:
         ttk.Button(mouse_frame, text="Arcball", command=self.set_arcball_mode).pack(side=tk.LEFT, padx=2)
         ttk.Button(mouse_frame, text="Fly", command=self.set_fly_mode).pack(side=tk.LEFT, padx=2)
         ttk.Button(mouse_frame, text="Model", command=self.set_model_mode).pack(side=tk.LEFT, padx=2)
+        
+        # Add rotation and zoom help text
+        rotation_frame = ttk.Frame(view_frame)
+        rotation_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(rotation_frame, text="Rotate: Middle/Right mouse button", font=("Arial", 8)).pack(anchor=tk.W)
+        ttk.Label(rotation_frame, text="Zoom: Mouse wheel", font=("Arial", 8)).pack(anchor=tk.W)
         
         # Background color
         bg_frame = ttk.Frame(view_frame)
